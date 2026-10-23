@@ -1,0 +1,87 @@
+name: Build APK from ZIP
+
+# Repo ke ROOT mein apni project .zip upload karo (jaise detox-guard.zip) aur push karo.
+# Ya Actions > Run workflow se, optional zip_path de sakte ho.
+on:
+  push:
+    paths: ["*.zip"]
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: "Zip ka path (khali = repo root ki sabse nayi .zip)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Unzip and build debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find and unzip project
+        env:
+          INPUT_ZIP: ${{ inputs.zip_path }}
+        run: |
+          ZIP="$INPUT_ZIP"
+          if [ -z "$ZIP" ]; then ZIP=$(ls -1t ./*.zip 2>/dev/null | head -n1); fi
+          if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
+            echo "::error::Repo root mein koi .zip nahi mili"; exit 1
+          fi
+          echo "Using zip: $ZIP"
+          rm -rf _unzipped && mkdir _unzipped
+          unzip -q -o "$ZIP" -d _unzipped
+          SETTINGS=$(find _unzipped -maxdepth 4 \( -name settings.gradle.kts -o -name settings.gradle \) \
+            -not -path '*/__MACOSX/*' -not -path '*/.gradle/*' | head -n1)
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::Zip ke andar settings.gradle(.kts) nahi mili"; exit 1
+          fi
+          DIR=$(dirname "$SETTINGS")
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE/$DIR" >> "$GITHUB_ENV"
+          echo "Project root: $DIR"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Pick Gradle command
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            echo "GRADLE_CMD=./gradlew" >> "$GITHUB_ENV"
+          else
+            curl -sL https://services.gradle.org/distributions/gradle-9.3.1-bin.zip -o /tmp/gradle.zip
+            unzip -q /tmp/gradle.zip -d /opt
+            echo "GRADLE_CMD=/opt/gradle-9.3.1/bin/gradle" >> "$GITHUB_ENV"
+          fi
+
+      - name: Ensure debug keystore (agar project maangta ho)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ ! -f debug.keystore ]; then
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey \
+              -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Build debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: $GRADLE_CMD assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DetoxGuard-Debug-APK
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          
